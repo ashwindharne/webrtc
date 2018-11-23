@@ -3,32 +3,45 @@ package network
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
 	"fmt"
 
 	"github.com/pions/webrtc/internal/srtp"
 	"github.com/pions/webrtc/pkg/rtp"
+	"github.com/pkg/errors"
+)
+
+const (
+	srtpMasterKeyLen     = 16
+	srtpMasterKeySaltLen = 14
 )
 
 // TODO: Migrate to srtp.Conn
 
-func (m *Manager) CreateContextSRTP(serverWriteKey, clientWriteKey []byte, profile string) error {
+// CreateContextSRTP takes the exported keying material from DTLS and creates Client/Server contexts
+func (m *Manager) CreateContextSRTP(keyingMaterial []byte) error {
+	offset := 0
+
+	clientWriteKey := append([]byte{}, keyingMaterial[offset:offset+srtpMasterKeyLen]...)
+	offset += srtpMasterKeyLen
+
+	serverWriteKey := append([]byte{}, keyingMaterial[offset:offset+srtpMasterKeyLen]...)
+	offset += srtpMasterKeyLen
+
+	clientWriteKey = append(clientWriteKey, keyingMaterial[offset:offset+srtpMasterKeySaltLen]...)
+	offset += srtpMasterKeySaltLen
+
+	serverWriteKey = append(serverWriteKey, keyingMaterial[offset:offset+srtpMasterKeySaltLen]...)
+
 	var err error
 	m.srtpInboundContextLock.Lock()
-	m.srtpInboundContext, err = srtp.CreateContext(
-		serverWriteKey[0:16],
-		serverWriteKey[16:],
-		profile)
+	m.srtpInboundContext, err = srtp.CreateContext(serverWriteKey[0:16], serverWriteKey[16:] /* Profile */, "")
 	m.srtpInboundContextLock.Unlock()
 	if err != nil {
 		return errors.New("failed to build inbound SRTP context")
 	}
 
 	m.srtpOutboundContextLock.Lock()
-	m.srtpOutboundContext, err = srtp.CreateContext(
-		clientWriteKey[0:16],
-		clientWriteKey[16:],
-		profile)
+	m.srtpOutboundContext, err = srtp.CreateContext(clientWriteKey[0:16], clientWriteKey[16:] /* Profile */, "")
 	m.srtpOutboundContextLock.Unlock()
 	if err != nil {
 		return errors.New("failed to build outbound SRTP context")
@@ -76,17 +89,9 @@ func (m *Manager) handleSRTP(buffer []byte) {
 		return
 	}
 
-	bufferTransport := m.bufferTransports[packet.SSRC]
-	if bufferTransport == nil {
-		bufferTransport = m.bufferTransportGenerator(packet.SSRC, packet.PayloadType)
-		if bufferTransport == nil {
-			return
-		}
-		m.bufferTransports[packet.SSRC] = bufferTransport
-	}
-
+	bufferTransport := m.getOrCreateBufferTransports(packet.SSRC, packet.PayloadType)
 	select {
-	case bufferTransport <- packet:
+	case bufferTransport.RTP <- packet:
 	default:
 	}
 
